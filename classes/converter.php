@@ -94,19 +94,44 @@ class converter implements \core_files\converter_interface {
         $params = [
             'filename' => urlencode("$path/$contenthash.$importextension"),
         ];
+        $behaviour = ['item' => ["@microsoft.graph.conflictBehavior" => "rename"]];
 
-        $client->setHeader('X-Upload-Content-Type: ' . $filemimetype);
-        $client->setHeader('X-Upload-Content-Length: ' . $filesize);
+        $response = $service->call('create_upload', $params, json_encode($behaviour));
 
-        $response = $service->call('upload', $params, $filecontent, $filemimetype);
+        if (empty($response->uploadUrl)) {
+            $conversion->set('status', conversion::STATUS_FAILED);
+            $conversion->set('statusmessage', get_string('uploadprepfailed', 'fileconverter_onedrive'));
+            return $this;
+        }
 
-        if (empty($response->id)) {
+        // Try each curl class in turn until we succeed.
+        // First attempt an upload with no auth headers (will work for personal onedrive accounts).
+        // If that fails, try an upload with the auth headers (will work for work onedrive accounts).
+        foreach ([new \curl(), $client] as $curlinstance) {
+            $curlinstance->setHeader('Content-type: ' . $filemimetype);
+            $curlinstance->setHeader('Content-Range: bytes 0-' . ($filesize - 1) . '/' . $filesize);
+            $uploadoptions = array(
+                'CURLOPT_PUT' => 1,
+                'CURLOPT_INFILESIZE' => $filesize,
+                'CURLOPT_INFILE' => $file->get_content_file_handle(),
+            );
+            $upload = $curlinstance->put($response->uploadUrl, [], $uploadoptions);
+            if ($curlinstance->errno == 0) {
+                $upload = json_decode($upload);
+            }
+            if (!empty($upload->id)) {
+                // We can stop now - there is a valid file returned.
+                break;
+            }
+        }
+
+        if (empty($upload->id)) {
             $conversion->set('status', conversion::STATUS_FAILED);
             $conversion->set('statusmessage', get_string('uploadfailed', 'fileconverter_onedrive'));
             return $this;
         }
 
-        $fileid = $response->id;
+        $fileid = $upload->id;
 
         // Convert the file.
         $convertparams = [
