@@ -67,10 +67,10 @@ class rest extends \core\oauth2\rest {
                 ],
                 'response' => 'headers'
             ],
-            // See: https://docs.microsoft.com/en-gb/graph/api/driveitem-put-content?view=graph-rest-1.0 for API doc.
-            'upload' => [
-                'endpoint' => self::API . '/me/drive/items/root:/{filename}:/content',
-                'method' => 'put',
+            // See: https://docs.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0 for API doc.
+            'create_upload' => [
+                'endpoint' => self::API . '/me/drive/items/root:/{filename}:/createUploadSession',
+                'method' => 'post',
                 'args' => [
                     'filename' => PARAM_RAW,
                 ],
