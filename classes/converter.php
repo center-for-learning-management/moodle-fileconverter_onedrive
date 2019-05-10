@@ -46,6 +46,12 @@ class converter implements \core_files\converter_interface {
             'rtf', 'xls', 'xlsx'],
     );
 
+    // Set fragment size to a multiple of 320KiB, ensuring maximum bytes in any request is less than 60MiB.
+    // (see https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession?view=odsp-graph-online)
+    // Chose to use a multiplier of 128, so each chunked request will be 40MiB.
+    /** @var int $fragementsize amount of data to be sent in each http request chunk. */
+    private static $fragementsize = 320 * 1024 * 128;
+
     /**
      * Convert a document to a new format and return a conversion object relating to the conversion in progress.
      *
@@ -53,131 +59,45 @@ class converter implements \core_files\converter_interface {
      * @return this
      */
     public function start_document_conversion(\core_files\conversion $conversion) {
-        global $CFG, $SITE;
-
         $file = $conversion->get_sourcefile();
         $format = $conversion->get('targetformat');
 
-        $issuerid = get_config('fileconverter_onedrive', 'issuerid');
-        if (empty($issuerid)) {
-            $conversion->set('status', conversion::STATUS_FAILED);
-            $conversion->set('statusmessage', get_string('test_issuernotset', 'fileconverter_onedrive'));
-            return $this;
-        }
+        try {
+            // Instantiate OAuth client and REST service.
+            $client = \core\oauth2\api::get_system_oauth_client($this->get_configured_oauth_issuer());
+            $service = new \fileconverter_onedrive\rest($client);
 
-        $issuer = \core\oauth2\api::get_issuer($issuerid);
-        if (empty($issuer)) {
-            $conversion->set('status', conversion::STATUS_FAILED);
-            $conversion->set('statusmessage', get_string('test_issuerinvalid', 'fileconverter_onedrive'));
-            return $this;
-        }
-        $client = \core\oauth2\api::get_system_oauth_client($issuer);
+            // Create upload session.
+            $response = $this->create_upload_session($service, $file);
 
-        $service = new \fileconverter_onedrive\rest($client);
+            // Actually upload the file to be converted.
+            $upload = $this->upload_file_to_be_converted($file, $client, $response->uploadUrl);
 
-        $contenthash = $file->get_contenthash();
+            // Trigger remote conversion.
+            // Microsoft OneDrive returns the location of the converted file in the Location header.
+            $responseheaders = $this->request_conversion_of_uploaded_file($service, $upload->id, $format);
 
-        $originalname = $file->get_filename();
-        if (strpos($originalname, '.') === false) {
-            $conversion->set('status', conversion::STATUS_FAILED);
-            return $this;
-        }
-        $importextension = substr($originalname, strrpos($originalname, '.') + 1);
+            // Download the converted file.
+            $downloadlocation = make_request_directory() . '/' . $upload->id . '.' . $format;
 
-        $filecontent = $file->get_content();
-        $filesize = $file->get_filesize();
-        $filemimetype = $file->get_mimetype();
-
-        // First upload the file.
-        // We use a path that should be unique to the Moodle site, and not clash with the onedrive repository plugin.
-        $path = '_fileconverter_onedrive_' . $SITE->shortname;
-        $params = [
-            'filename' => urlencode("$path/$contenthash.$importextension"),
-        ];
-        $behaviour = ['item' => ["@microsoft.graph.conflictBehavior" => "rename"]];
-
-        $response = $service->call('create_upload', $params, json_encode($behaviour));
-
-        if (empty($response->uploadUrl)) {
-            $conversion->set('status', conversion::STATUS_FAILED);
-            $conversion->set('statusmessage', get_string('uploadprepfailed', 'fileconverter_onedrive'));
-            return $this;
-        }
-
-        // Try each curl class in turn until we succeed.
-        // First attempt an upload with no auth headers (will work for personal onedrive accounts).
-        // If that fails, try an upload with the auth headers (will work for work onedrive accounts).
-        foreach ([new \curl(), $client] as $curlinstance) {
-            $curlinstance->setHeader('Content-type: ' . $filemimetype);
-            $curlinstance->setHeader('Content-Range: bytes 0-' . ($filesize - 1) . '/' . $filesize);
-            $uploadoptions = array(
-                'CURLOPT_PUT' => 1,
-                'CURLOPT_INFILESIZE' => $filesize,
-                'CURLOPT_INFILE' => $file->get_content_file_handle(),
+            $this->download_converted_file(
+                $client,
+                $this->extract_named_header($responseheaders, 'Location'),
+                $downloadlocation
             );
-            $upload = $curlinstance->put($response->uploadUrl, [], $uploadoptions);
-            if ($curlinstance->errno == 0) {
-                $upload = json_decode($upload);
-            }
-            if (!empty($upload->id)) {
-                // We can stop now - there is a valid file returned.
-                break;
-            }
-        }
 
-        if (empty($upload->id)) {
-            $conversion->set('status', conversion::STATUS_FAILED);
-            $conversion->set('statusmessage', get_string('uploadfailed', 'fileconverter_onedrive'));
-            return $this;
-        }
-
-        $fileid = $upload->id;
-
-        // Convert the file.
-        $convertparams = [
-            'itemid' => $fileid,
-            'format' => $format,
-        ];
-        $headers = $service->call('convert', $convertparams);
-
-        $downloadurl;
-        // Microsoft OneDrive returns the location of the converted file in the Location header.
-        foreach ($headers as $header) {
-            if (strpos($header, 'Location:') === 0) {
-                $downloadurl = trim(substr($header, strpos($header, ':') + 1));
-            }
-        }
-
-        if (empty($downloadurl)) {
-            $conversion->set('status', conversion::STATUS_FAILED);
-            $conversion->set('statusmessage', get_string('nodownloadurl', 'fileconverter_onedrive'));
-            return $this;
-        }
-
-        $sourceurl = new moodle_url($downloadurl);
-        $source = $sourceurl->out(false);
-
-        $tmp = make_request_directory();
-        $downloadto = $tmp . '/' . $fileid . '.' . $format;
-
-        $options = ['filepath' => $downloadto, 'timeout' => 15, 'followlocation' => true, 'maxredirs' => 5];
-        $success = $client->download_one($source, null, $options);
-
-        if ($success) {
-            $conversion->store_destfile_from_path($downloadto);
+            $conversion->store_destfile_from_path($downloadlocation);
             $conversion->set('status', conversion::STATUS_COMPLETE);
             $conversion->update();
-        } else {
-            $conversion->set('status', conversion::STATUS_FAILED);
-            $conversion->set('statusmessage', get_string('downloadfailed', 'fileconverter_onedrive'));
-        }
-        // Cleanup.
-        $deleteparams = [
-            'itemid' => $fileid
-        ];
-        $service->call('delete', $deleteparams);
 
-        return $this;
+            // Clean up by deleting the file created in the remote service.
+            $this->delete_lingering_remote_file($service, $upload->id);
+        } catch (\Exception $e) {
+            $conversion->set('status', conversion::STATUS_FAILED);
+            $conversion->set('statusmessage', $e->getMessage());
+        } finally {
+            return $this;
+        }
     }
 
     /**
@@ -204,7 +124,8 @@ class converter implements \core_files\converter_interface {
                 $filerecord['itemid'], $filerecord['filepath'], $filerecord['filename']);
 
         if (!$testdocx) {
-            $fixturefile = dirname(__DIR__) . '/tests/fixtures/source.docx';
+            $fixturefile = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'tests' . DIRECTORY_SEPARATOR .
+                'fixtures' . DIRECTORY_SEPARATOR . 'source.docx';
             $testdocx = $fs->create_file_from_pathname($filerecord, $fixturefile);
         }
 
@@ -235,6 +156,208 @@ class converter implements \core_files\converter_interface {
      */
     public function poll_conversion_status(conversion $conversion) {
         return $this;
+    }
+
+    /**
+     * Request the removal/deletion of a file in oneDrive.
+     *
+     * @param \fileconverter_onedrive\rest $restservice Microsoft OneDrive Rest API client
+     * @param string $remoteidofuploadedfile OneDrive ID of the file to be removed/deleted
+     *
+     * @throws \Exception
+     */
+    private function delete_lingering_remote_file($restservice, $remoteidofuploadedfile) {
+        // Cleanup.
+        $deleteparams = [
+            'itemid' => $remoteidofuploadedfile
+        ];
+
+        try {
+            $restservice->call('delete', $deleteparams);
+        } catch (\Exception $e) {
+            throw new \Exception(get_string('remotedeletefailed', 'fileconverter_onedrive') .
+                ' because ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Extract a specifically named HTTP header from an array of HTTP headers.
+     *
+     * @param array $headers Array of HTTP headers
+     * @param string $soughtheader Name of the sought after header
+     * @return string
+     */
+    private function extract_named_header($headers, $soughtheader) {
+        foreach ($headers as $header) {
+            if (strpos($header, $soughtheader) === 0) {
+                return trim(substr($header, strpos($header, ':') + 1));
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Download a remote file to a local destination
+     *
+     * @param \core\oauth2\client $oauthclient OAuth2 client
+     * @param string $downloadfrom Remote file location
+     * @param string $downloadto Location to store downloaded file locally
+     *
+     * @throws \Exception
+     */
+    private function download_converted_file($oauthclient, $downloadfrom, $downloadto) {
+        if (empty($downloadfrom)) {
+            throw new \Exception(get_string('nodownloadurl', 'fileconverter_onedrive'));
+        }
+
+        $sourceurl = new moodle_url($downloadfrom);
+        $source = $sourceurl->out(false);
+
+        $options = ['filepath' => $downloadto, 'timeout' => 15, 'followlocation' => true, 'maxredirs' => 5];
+        if (!$oauthclient->download_one($source, null, $options)) {
+            throw new \Exception(get_string('downloadfailed', 'fileconverter_onedrive'));
+        }
+    }
+
+    /**
+     * Trigger conversion of a file in OneDrive
+     *
+     * @param \fileconverter_onedrive\rest $restservice Microsoft OneDrive Rest API client
+     * @param string $remoteidofuploadedfile ID of Remote file in OneDrive
+     * @param string $requiredformat File format to convert to (e.g. pdf)
+     *
+     * @return string|stdClass|array
+     * @throws \Exception
+     */
+    private function request_conversion_of_uploaded_file($restservice, $remoteidofuploadedfile, $requiredformat) {
+        // Convert the file.
+        $convertparams = [
+            'itemid' => $remoteidofuploadedfile,
+            'format' => $requiredformat,
+        ];
+
+        try {
+            return $restservice->call('convert', $convertparams);
+        } catch (\Exception $e) {
+            throw new \Exception(get_string('conversionrequestfailed', 'fileconverter_onedrive') .
+                ' because ' . $e->getMessage());
+        }
+    }
+
+
+    /**
+     * Upload the file to be converted to OneDrive
+     *
+     * @param stored_file $filetobeconverted File to be converted
+     * @param \core\oauth2\client $oauthclient OAuth2 client
+     * @param string $uploadurl OneDrive upload URL
+     *
+     * @return Object
+     * @throws \Exception
+     */
+    private function upload_file_to_be_converted($filetobeconverted, $oauthclient, $uploadurl) {
+
+        $filesize = $filetobeconverted->get_filesize();
+        $nofragments = ceil($filesize / self::$fragementsize);
+
+        foreach ([new \curl(['debug' => false]), $oauthclient] as $curlinstance) {
+            for ($i = 0; $i < $nofragments; $i++) {
+
+                $chunksize = (($i + 1) == $nofragments) ? ($filesize % self::$fragementsize) : self::$fragementsize;
+                $rangestart = $i * self::$fragementsize;
+                $rangeend = $rangestart + $chunksize - 1;
+
+                // Reset, then set headers.
+                $curlinstance->resetHeader();
+
+                $headers['Content-Range'] = 'bytes ' . $rangestart . '-' . $rangeend . '/' . $filesize;
+                $headers['Content-Length'] = $chunksize;
+
+                foreach ($headers as $headername => $headerval) {
+                    $curlinstance->setHeader($headername . ': ' . $headerval);
+                }
+
+                // Upload fragment/chunk.
+                $datachunk = stream_get_contents($filetobeconverted->get_content_file_handle(), $chunksize, $rangestart);
+                $upload = $curlinstance->put($uploadurl, $datachunk, []);
+            }
+
+            if ($curlinstance->errno == 0) {
+                $upload = json_decode($upload);
+            }
+
+            if (!empty($upload->id)) {
+                // We can stop now - there is a valid file returned.
+                break;
+            }
+        }
+
+        if (empty($upload->id)) {
+            throw new \Exception(get_string('missinguploadid', 'fileconverter_onedrive'));
+        }
+
+        return $upload;
+    }
+
+    /**
+     * Request creation of an upload session in OneDrive
+     *
+     * @param \fileconverter_onedrive\rest $restservice Microsoft OneDrive Rest API client
+     * @param stored_file $filetobeconverted File to be converted
+     *
+     * @return StdClass
+     * @throws \Exception
+     */
+    private function create_upload_session($restservice, $filetobeconverted) {
+        global $SITE;
+
+        $originalname = $filetobeconverted->get_filename();
+        $contenthash = $filetobeconverted->get_contenthash();
+
+        if (strpos($originalname, '.') === false) {
+            throw new \Exception(get_string('missingfileextension', 'fileconverter_onedrive'));
+        }
+
+        $importextension = substr($originalname, strrpos($originalname, '.') + 1);
+
+        // First upload the file.
+        // We use a path that should be unique to the Moodle site, and not clash with the onedrive repository plugin.
+        $path = '_fileconverter_onedrive_' . $SITE->shortname;
+        $params = [
+            'filename' => urlencode("$path/$contenthash.$importextension"),
+        ];
+        $behaviour = ['item' => ["@microsoft.graph.conflictBehavior" => "rename"]];
+
+        $response = $restservice->call('create_upload', $params, json_encode($behaviour));
+
+        if (empty($response->uploadUrl)) {
+            throw new \Exception(get_string('uploadprepfailed', 'fileconverter_onedrive'));
+        }
+
+        return $response;
+    }
+
+    /**
+     * Return OAuth issuer for this plugin in Moodle admin interface
+     *
+     * @return \core\oauth2\issuer
+     * @throws \Exception
+     */
+    private function get_configured_oauth_issuer() {
+
+        $issuerid = get_config('fileconverter_onedrive', 'issuerid');
+
+        if (empty($issuerid)) {
+            throw new \Exception(get_string('test_issuernotset', 'fileconverter_onedrive'));
+        }
+
+        $issuer = \core\oauth2\api::get_issuer($issuerid);
+
+        if (empty($issuer)) {
+            throw new \Exception(get_string('test_issuerinvalid', 'fileconverter_onedrive'));
+        }
+
+        return $issuer;
     }
 
     /**
