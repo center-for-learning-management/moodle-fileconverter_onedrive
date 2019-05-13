@@ -47,5 +47,5 @@ $string['uploadprepfailed'] = 'An upload session could not be created.';
 $string['missingfileextension'] = 'The file to be converted does not seem to have an extension at the end of its name.';
 $string['missinguploadid'] = 'Upload attempt failed. There was no upload Id present in the response of the upload REST call.';
 $string['chunkfileopenfail'] = 'Unable to open file to enable chunking.';
-$string['remotedeletefailed'] = 'Failed to delete remote file in OneDrive';
-$string['conversionrequestfailed'] = 'Request to convert file in OneDrive failed';
+$string['remotedeletefailed'] = 'Failed to delete remote file in OneDrive because {$a}.';
+$string['conversionrequestfailed'] = 'Request to convert file in OneDrive failed because {$a}.';

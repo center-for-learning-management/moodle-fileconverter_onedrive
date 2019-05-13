@@ -175,8 +175,11 @@ class converter implements \core_files\converter_interface {
         try {
             $restservice->call('delete', $deleteparams);
         } catch (\Exception $e) {
-            throw new \Exception(get_string('remotedeletefailed', 'fileconverter_onedrive') .
-                ' because ' . $e->getMessage());
+            throw new \Exception(get_string(
+                'remotedeletefailed',
+                'fileconverter_onedrive',
+                $e->getMessage()
+            ));
         }
     }
 
@@ -239,8 +242,11 @@ class converter implements \core_files\converter_interface {
         try {
             return $restservice->call('convert', $convertparams);
         } catch (\Exception $e) {
-            throw new \Exception(get_string('conversionrequestfailed', 'fileconverter_onedrive') .
-                ' because ' . $e->getMessage());
+            throw new \Exception(get_string(
+                'conversionrequestfailed',
+                'fileconverter_onedrive',
+                $e->getMessage()
+            ));
         }
     }
 
