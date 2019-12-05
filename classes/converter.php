@@ -140,8 +140,9 @@ class converter implements \core_files\converter_interface {
         $this->start_document_conversion($conversion);
 
         if ($conversion->get('status') === conversion::STATUS_FAILED) {
-            $errors = array_merge($conversion->get_errors(), ['statusmessage' => $conversion->get('statusmessage')]);
-            print_error('conversionfailed', 'fileconverter_onedrive', '', $errors);
+            $errors = $conversion->get('statusmessage');
+            $debugging = var_export($conversion->get_errors(), true);
+            print_error('conversionfailed', 'fileconverter_onedrive', '', $errors, $debugging);
         }
 
         $testfile = $conversion->get_destfile();
