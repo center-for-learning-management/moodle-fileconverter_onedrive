@@ -49,3 +49,4 @@ $string['missinguploadid'] = 'Upload attempt failed. There was no upload Id pres
 $string['chunkfileopenfail'] = 'Unable to open file to enable chunking.';
 $string['remotedeletefailed'] = 'Failed to delete remote file in OneDrive because {$a}.';
 $string['conversionrequestfailed'] = 'Request to convert file in OneDrive failed because {$a}.';
+$string['conversionfailed'] = 'Conversion test failed: {$a}';
