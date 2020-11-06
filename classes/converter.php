@@ -402,6 +402,10 @@ class converter implements \core_files\converter_interface {
      * @return bool
      */
     public static function supports($from, $to) {
+        // Make sure the case will match the supported array.
+        $to = trim(\core_text::strtolower($to));
+        $from = trim(\core_text::strtolower($from));
+
         if (!isset(self::$supported[$to])) {
             // The output is not supported.
             return false;
