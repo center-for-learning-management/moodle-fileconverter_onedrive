@@ -42,7 +42,7 @@ use \core_files\conversion;
 class converter implements \core_files\converter_interface {
     /** @var array $supported Map of output formats to input formats. */
     private static $supported = array(
-        'pdf' => ['csv', 'doc', 'docx', 'odp', 'ods', 'odt', 'pot', 'potm', 'potx', 'pps', 'ppsx', 'ppsxm', 'ppt', 'pptm', 'pptx',
+        'pdf' => ['csv', 'doc', 'docx', 'pot', 'potm', 'potx', 'pps', 'ppsx', 'ppsxm', 'ppt', 'pptm', 'pptx',
             'rtf', 'xls', 'xlsx'],
     );
 

@@ -26,7 +26,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'fileconverter_onedrive';
-$plugin->version = 2020110600;
+$plugin->version = 2020110601;
 $plugin->requires = 2018051703;
 $plugin->release = '1.1.3 (2020-11-06)';
 $plugin->maturity = MATURITY_STABLE;
